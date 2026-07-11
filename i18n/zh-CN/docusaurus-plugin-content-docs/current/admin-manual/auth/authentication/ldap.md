@@ -17,7 +17,11 @@
         "SSLHandshakeException",
         "PKIX path building failed",
         "明文密码插件",
-        "cleartext plugin"
+        "cleartext plugin",
+        "DBeaver LDAP",
+        "ldap_group_filter",
+        "ldap_read_timeout_ms",
+        "ldap_connect_timeout_ms"
     ]
 }
 ---
@@ -87,7 +91,7 @@ Apache Doris 支持接入第三方 LDAP 服务，将企业内已有的账号体�
 
 1. **配置 Doris FE**：在 `fe.conf` 中切换认证方式，并在 `ldap.conf` 中填写 LDAP 服务连接信息。
 2. **设置 LDAP 管理员密码**：登录 Doris 后，通过 SQL 写入 `ldap_admin_password`。
-3. **配置客户端**：MySQL Client 或 JDBC Client 启用明文密码插件，以便发送 LDAP 密码。
+3. **配置客户端**：MySQL Client、JDBC Client 或 DBeaver 启用明文密码插件，以便发送 LDAP 密码。
 4. **（可选）启用 LDAPS**：加密 FE 与 LDAP 之间的链路。
 5. **（可选）配置组授权**：在 Doris 中创建与 LDAP 组同名的 `role` 并授权。
 6. **（可选）配置默认角色**：通过 `ldap_default_roles` 为所有 LDAP 认证用户授予基础 Doris 角色。
@@ -105,33 +109,68 @@ Apache Doris 支持接入第三方 LDAP 服务，将企业内已有的账号体�
 authentication_type=ldap
 ```
 
+该配置用于指定 FE 使用 LDAP 作为主认证方式。修改该配置后需要重启 FE 才能生效。
+
+:::note
+`ldap_authentication_enabled` 是历史兼容配置项。新部署建议使用 `authentication_type=ldap` 开启 LDAP 认证；如果旧集群已经在 `ldap.conf` 中配置 `ldap_authentication_enabled = true`，Doris 仍会兼容识别。
+:::
+
 ### 1.2 配置 LDAP 连接信息
 
 在 `fe/conf/ldap.conf` 中填写 LDAP 服务的连接信息：
 
 ```text
-ldap_authentication_enabled = true
-ldap_host = ladp-host
+ldap_host = ldap.example.com
 ldap_port = 389
-ldap_admin_name = uid=admin,o=emr
-ldap_user_basedn = ou=people,o=emr
+ldap_admin_name = cn=admin,dc=example,dc=com
+ldap_user_basedn = ou=people,dc=example,dc=com
 ldap_user_filter = (&(uid={login}))
-ldap_group_basedn = ou=group,o=emr
+ldap_group_basedn = ou=groups,dc=example,dc=com
 ldap_default_roles = ldap_readonly,ldap_query_user
 ```
 
-各配置项含义如下：
+除“可在线修改”为“是”的配置外，修改 `ldap.conf` 后需要重启 FE 才能生效。
 
-| 配置项 | 说明 |
-| --- | --- |
-| `ldap_authentication_enabled` | 是否启用 LDAP 认证，必须为 `true` |
-| `ldap_host` | LDAP 服务器地址 |
-| `ldap_port` | LDAP 服务端口，明文 LDAP 默认 `389`，LDAPS 默认 `636` |
-| `ldap_admin_name` | LDAP 管理员 `dn`，Doris 使用该账号去查询用户和组信息 |
-| `ldap_user_basedn` | 用户搜索的基准 `dn` |
-| `ldap_user_filter` | 用户匹配过滤器，`{login}` 会被替换为登录用户名 |
-| `ldap_group_basedn` | 组搜索的基准 `dn`，用于组授权 |
-| `ldap_default_roles` | 可选。为所有 LDAP 认证用户授予的 Doris 角色，多个角色用逗号分隔。这些角色会在 LDAP 组角色之外额外授予（自 4.0.7、4.1.3 版本开始支持） |
+| 配置项 | 默认值 | 是否必填 | 可在线修改 | 配置要求 |
+| --- | --- | --- | --- | --- |
+| `ldap_host` | 空字符串 | 是 | 否 | LDAP 服务器主机名或 IP 地址。不要填写 `ldap://`、`ldaps://` 前缀，也不要填写端口；Doris 会根据 `ldap_use_ssl` 和 `ldap_port` 生成连接地址。 |
+| `ldap_port` | `389` | 是 | 否 | LDAP 服务端口。明文 LDAP 通常为 `389`；启用 LDAPS 时通常为 `636`，并需要同时配置 `ldap_use_ssl = true`。 |
+| `ldap_admin_name` | 空字符串 | 是 | 否 | Doris 连接 LDAP 服务时使用的 bind DN，例如 `cn=admin,dc=example,dc=com`。该账号需要具备查询用户和组信息的权限。该账号的密码不写在 `ldap.conf` 中，需要通过 `SET LDAP_ADMIN_PASSWORD` 设置。 |
+| `ldap_user_basedn` | 空字符串 | 是 | 否 | Doris 搜索登录用户的 base DN。搜索范围过窄会导致 LDAP 用户查不到；搜索范围过宽可能查到重复用户或增加查询耗时。 |
+| `ldap_user_filter` | `(&(uid={login}))` | 是 | 否 | 登录用户匹配过滤器。`{login}` 会被替换为客户端登录用户名。该过滤器必须只匹配一个 LDAP 用户，否则 Doris 会拒绝登录并提示用户不唯一。常见写法包括 `(&(uid={login}))`、`(&(mail={login}@example.com))`、`(&(sAMAccountName={login}))`。 |
+| `ldap_group_basedn` | 空字符串 | 否 | 否 | Doris 搜索用户所属组的 base DN。留空时不启用 LDAP 组到 Doris role 的映射，但不影响 `ldap_default_roles`。 |
+| `ldap_group_filter` | 空字符串 | 否 | 否 | 自定义组查询过滤器。默认情况下 Doris 使用 `(member=<user_dn>)` 在 `ldap_group_basedn` 下查找组；如果 LDAP 使用 `memberUid` 等非标准成员属性，可配置例如 `(&(objectClass=posixGroup)(memberUid={login}))`。配置该项后，返回组 DN 的第一个 RDN 值仍需与 Doris 中的 role 同名。 |
+| `ldap_default_roles` | 空列表 | 否 | 是 | 为所有 LDAP 认证成功的用户额外授予的 Doris role，多个 role 使用英文逗号分隔，例如 `ldap_readonly,ldap_query_user`。role 必须已在 Doris 中创建；不存在的 role 会被忽略并记录 warning 日志。该配置自 4.0.7、4.1.3 版本开始支持。 |
+| `ldap_use_ssl` | `false` | 否 | 否 | 是否使用 LDAPS 连接 LDAP 服务。设置为 `true` 后 Doris 使用 `ldaps://` 协议连接 LDAP 服务器，通常需要将 `ldap_port` 设置为 `636`，并确保 LDAP 服务端证书被 FE 所在 JVM 信任。 |
+| `ldap_authentication_enabled` | `false` | 否 | 否 | 历史兼容开关。新部署建议使用 `fe.conf` 中的 `authentication_type=ldap`；旧配置中如果该项为 `true`，Doris 仍会进入 LDAP 认证流程。 |
+
+高级连接与缓存配置如下，通常只有在排查连接超时、LDAP 查询延迟或缓存生效问题时才需要调整。
+
+| 配置项 | 默认值 | 可在线修改 | 配置要求 |
+| --- | --- | --- | --- |
+| `ldap_user_cache_timeout_s` | `300` | 是 | 单个 LDAP 用户信息的缓存时间，单位为秒。缓存过期后，Doris 会重新查询 LDAP 服务。修改 LDAP 用户、组信息或 Doris role 权限后，如需立即生效，可执行 `REFRESH LDAP`。 |
+| `ldap_cache_timeout_day` | `30` | 是 | LDAP 用户缓存的全局清理周期，单位为天。达到该周期后 Doris 会清理全部 LDAP 用户缓存。 |
+| `ldap_read_timeout_ms` | `5000` | 否 | LDAP 请求发出后等待响应的超时时间，单位为毫秒。设置为 `0` 表示不超时，不建议在生产环境使用。 |
+| `ldap_connect_timeout_ms` | `5000` | 否 | 与 LDAP 服务器建立 TCP 连接的超时时间，单位为毫秒。网络链路较慢时可适当调大。 |
+| `ldap_search_use_pool` | `true` | 否 | 是否对 LDAP 查询连接使用连接池。如果 LDAP 服务器、防火墙或 NAT 会关闭空闲连接，导致登录时偶发接近超时时间的延迟，可考虑设置为 `false`。 |
+| `ldap_pool_max_active` | `8` | 否 | 连接池中每类连接可同时分配的最大活跃连接数，非正数表示不限制。仅在 `ldap_search_use_pool = true` 时生效。 |
+| `ldap_pool_max_total` | `-1` | 否 | 连接池整体可同时分配的最大活跃连接数，非正数表示不限制。 |
+| `ldap_pool_max_idle` | `8` | 否 | 连接池中每类连接可保持空闲的最大连接数，非正数表示不限制。 |
+| `ldap_pool_min_idle` | `0` | 否 | 连接池中每类连接保留的最小空闲连接数。 |
+| `ldap_pool_max_wait` | `-1` | 否 | 连接池无可用连接时等待连接归还的最长时间，单位为毫秒，非正数表示一直等待。 |
+| `ldap_pool_when_exhausted` | `1` | 否 | 连接池耗尽时的处理方式：`0` 表示直接抛出异常，`1` 表示等待可用连接，`2` 表示创建新连接。 |
+| `ldap_pool_test_on_borrow` | `true` | 否 | 从连接池借出连接前是否校验连接有效性。校验能减少坏连接，但可能增加一次 LDAP 请求延迟。 |
+| `ldap_pool_test_on_return` | `true` | 否 | 归还连接到连接池前是否校验连接有效性。 |
+| `ldap_pool_test_while_idle` | `true` | 否 | 空闲连接检测线程是否校验连接有效性。 |
+
+可在线修改的 LDAP 配置可以通过 `ADMIN SET FRONTEND CONFIG` 更新，例如：
+
+```sql
+ADMIN SET FRONTEND CONFIG ("ldap_default_roles" = "ldap_readonly,ldap_query_user");
+ADMIN SET FRONTEND CONFIG ("ldap_user_cache_timeout_s" = "300");
+```
+
+在线修改 `ldap_default_roles` 后，Doris 会自动刷新 LDAP 用户缓存；修改其他缓存相关参数后，如需立即重新加载 LDAP 用户信息，可执行 `REFRESH LDAP`。
 
 :::tip
 如需启用 LDAPS（加密连接至 LDAP 服务器），请参阅下文 [LDAPS（加密连接）](#ldaps加密连接) 章节。
@@ -154,6 +193,8 @@ set ldap_admin_password = password('<ldap_admin_password>');
 
 LDAP 认证要求客户端以明文方式发送密码，因此需要启用明文验证插件。
 
+本节中的 `enable_ssl` 指 Doris 客户端到 FE 的 MySQL 协议连接 SSL；它与 `ldap_use_ssl` 不同，`ldap_use_ssl` 用于控制 FE 到 LDAP 服务器之间是否使用 LDAPS。
+
 ### 2.1 MySQL Client
 
 可以通过以下任一方式启用明文验证插件：
@@ -167,53 +208,113 @@ LDAP 认证要求客户端以明文方式发送密码，因此需要启用明文
 - **方式二**：登录时添加参数（单次生效）
 
     ```shell
-    mysql -hDORIS_HOST -PDORIS_PORT -u user -p --enable-cleartext-plugin
+    mysql -hDORIS_HOST -PDORIS_PORT -u user --enable-cleartext-plugin -p
     ```
 
 ### 2.2 JDBC Client
 
-JDBC 默认要求明文密码插件在 SSL 之上使用。是否开启 SSL 决定了 JDBC URL 的写法：
+JDBC Client 使用 LDAP 登录时，也需要使用 MySQL 明文密码插件。MySQL Connector/J 默认要求明文密码插件运行在 SSL 连接之上，因此 Doris FE 是否开启 SSL 会影响 JDBC URL 和客户端依赖配置。
 
 #### 场景 A：Doris 未开启 SSL
 
-需要自定义认证插件以绕过 SSL 限制：
+如果 Doris FE 未开启 SSL，需要使用自定义认证插件绕过 MySQL Connector/J 对明文密码插件的 SSL 限制。
 
-1. 创建自定义插件类，继承 `MysqlClearPasswordPlugin` 并重写 `requiresConfidentiality()` 方法：
+可以参考 [doris-debug-tools/jdbc-test](https://github.com/morningman/doris-debug-tools/tree/main/jdbc-test) 生成独立插件 jar：
 
-    ```java
-    public class MysqlClearPasswordPluginWithoutSSL extends MysqlClearPasswordPlugin {
-        @Override
-        public boolean requiresConfidentiality() {
-            return false;
-        }
+```shell
+git clone https://github.com/morningman/doris-debug-tools.git
+cd doris-debug-tools/jdbc-test
+./build-auth-plugin.sh
+```
+
+脚本执行成功后会生成：
+
+```text
+output/auth-plugin/doris-clear-password-plugin.jar
+```
+
+该 jar 中的插件类会重写 MySQL Connector/J 明文密码插件的 `requiresConfidentiality()` 方法，使其在非 SSL JDBC 连接中也可以发送 LDAP 密码。核心逻辑如下：
+
+```java
+public class ClearPasswordPlugin extends MysqlClearPasswordPlugin {
+    @Override
+    public boolean requiresConfidentiality() {
+        return false;
     }
-    ```
+}
+```
 
-2. 在 JDBC 连接 URL 中配置自定义插件（将 `xxx` 替换为实际的包名）：
+将生成的 `doris-clear-password-plugin.jar` 加入 JDBC 应用的 classpath 后，在 JDBC URL 中配置自定义插件：
 
-    ```sql
-    jdbcUrl = "jdbc:mysql://localhost:9030/mydatabase?authenticationPlugins=xxx.xxx.xxx.MysqlClearPasswordPluginWithoutSSL&defaultAuthenticationPlugin=xxx.xxx.xxx.MysqlClearPasswordPluginWithoutSSL&disabledAuthenticationPlugins=com.mysql.jdbc.authentication.MysqlClearPasswordPlugin";
-    ```
+```text
+jdbc:mysql://<fe_host>:<query_port>/<database>?authenticationPlugins=com.doris.jdbc.auth.ClearPasswordPlugin&defaultAuthenticationPlugin=com.doris.jdbc.auth.ClearPasswordPlugin&disabledAuthenticationPlugins=com.mysql.cj.protocol.a.authentication.MysqlClearPasswordPlugin
+```
 
-    需要配置的三个属性说明：
+需要配置的三个属性说明如下：
 
-    | 属性 | 说明 |
-    | --- | --- |
-    | `authenticationPlugins` | 注册自定义的明文认证插件 |
-    | `defaultAuthenticationPlugin` | 将自定义插件设为默认认证插件 |
-    | `disabledAuthenticationPlugins` | 禁用原始的明文认证插件（该插件强制要求 SSL） |
+| 属性 | 说明 |
+| --- | --- |
+| `authenticationPlugins` | 注册自定义的明文认证插件 |
+| `defaultAuthenticationPlugin` | 将自定义插件设为默认认证插件 |
+| `disabledAuthenticationPlugins` | 禁用 MySQL Connector/J 原生的明文密码插件，避免其强制要求 SSL |
 
 :::tip
-可以参考[该代码库](https://github.com/morningman/doris-debug-tools/tree/main/jdbc-test) 中的相关示例。执行 `build-auth-plugin.sh` 可直接生成上述插件 jar 包，然后放置到客户端指定位置。
+如果使用的是 MySQL Connector/J 5.x，原生明文密码插件类名可能是 `com.mysql.jdbc.authentication.MysqlClearPasswordPlugin`。如果配置后提示插件类不存在，请根据实际使用的 Connector/J 版本调整 `disabledAuthenticationPlugins`。
 :::
 
 #### 场景 B：Doris 开启 SSL
 
 在 `fe.conf` 中添加 `enable_ssl=true` 后，JDBC URL 可直接使用 MySQL 原生的明文密码插件：
 
-```sql
-jdbcUrl = "jdbc:mysql://localhost:9030/mydatabase?useSSL=true&sslMode=REQUIRED
+```text
+jdbc:mysql://<fe_host>:<query_port>/<database>?useSSL=true&sslMode=REQUIRED
 ```
+
+如果 FE 使用自签名证书，还需要在 JDBC 客户端所在 JVM 中配置信任证书，或在 JDBC URL 中按 MySQL Connector/J 的要求配置 `trustCertificateKeyStoreUrl`、`trustCertificateKeyStorePassword` 等参数。
+
+### 2.3 DBeaver
+
+DBeaver 使用 MySQL JDBC Driver 连接 Doris，因此 LDAP 登录也遵循 JDBC Client 的规则。
+
+#### Doris 未开启 SSL
+
+如果 Doris FE 未开启 SSL，需要将上文生成的自定义明文密码插件 jar 添加到 DBeaver 的 MySQL Driver 中：
+
+1. 生成插件 jar：
+
+    ```shell
+    git clone https://github.com/morningman/doris-debug-tools.git
+    cd doris-debug-tools/jdbc-test
+    ./build-auth-plugin.sh
+    ```
+
+    生成文件为 `output/auth-plugin/doris-clear-password-plugin.jar`。
+
+2. 在 DBeaver 中打开 **Database > Driver Manager**，选择 **MySQL** 驱动并单击 **Edit**。
+3. 在 **Libraries** 页签中单击 **Add File**，选择 `doris-clear-password-plugin.jar`。保留原有 MySQL Connector/J 驱动 jar。
+4. 创建或编辑 Doris 连接，在 **Main** 页签填写 FE 地址、查询端口、数据库、用户名和密码。这里的密码应填写 LDAP 密码。
+5. 在连接配置的 **Driver properties** 中添加以下属性：
+
+    | 属性 | 值 |
+    | --- | --- |
+    | `authenticationPlugins` | `com.doris.jdbc.auth.ClearPasswordPlugin` |
+    | `defaultAuthenticationPlugin` | `com.doris.jdbc.auth.ClearPasswordPlugin` |
+    | `disabledAuthenticationPlugins` | `com.mysql.cj.protocol.a.authentication.MysqlClearPasswordPlugin` |
+
+6. 单击 **Test Connection** 验证连接。
+
+如果测试连接提示 `ClassNotFoundException` 或找不到 `com.doris.jdbc.auth.ClearPasswordPlugin`，通常说明插件 jar 没有添加到当前 MySQL Driver 的 Libraries 中，或 DBeaver 使用的不是刚刚编辑的 MySQL Driver。
+
+#### Doris 已开启 SSL
+
+如果 Doris FE 已配置 `enable_ssl=true`，DBeaver 可以直接使用 MySQL Connector/J 原生明文密码插件。连接配置中需要启用 SSL，或在 **Driver properties** 中添加：
+
+| 属性 | 值 |
+| --- | --- |
+| `useSSL` | `true` |
+| `sslMode` | `REQUIRED` |
+
+如果 FE 使用自签名证书，还需要在 DBeaver 所使用的 JVM 中信任该证书，或根据 MySQL Connector/J 的证书配置方式指定 trustStore。
 
 ## 验证登录
 
@@ -258,14 +359,18 @@ LDAP 验证登录是指通过 LDAP 服务进行密码验证，以补充 Doris �
 使用 LDAP 密码登录，成功：
 
 ```sql
-mysql -hDoris_HOST -PDoris_PORT -ujack -p abcdef
+mysql -hDoris_HOST -PDoris_PORT -ujack --enable-cleartext-plugin -p
 ```
+
+按提示输入 LDAP 密码 `abcdef`。
 
 使用 Doris 密码登录，失败（开启 LDAP 后，LDAP 用户必须使用 LDAP 密码）：
 
 ```sql
-mysql -hDoris_HOST -PDoris_PORT -ujack -p 123456
+mysql -hDoris_HOST -PDoris_PORT -ujack --enable-cleartext-plugin -p
 ```
+
+按提示输入 Doris 密码 `123456`，登录失败。
 
 **场景二：仅 LDAP 中存在用户**
 
@@ -274,8 +379,10 @@ mysql -hDoris_HOST -PDoris_PORT -ujack -p 123456
 使用 LDAP 密码登录，Doris 自动创建临时用户 `jack@'%'` 并登录。如果存在可用角色，临时用户会获得 LDAP 组角色和配置的默认角色。如果没有匹配角色，则具有基本权限 `DatabasePrivs`：`Select_priv`，断开连接后自动销毁：
 
 ```sql
-mysql -hDoris_HOST -PDoris_PORT -ujack -p abcdef
+mysql -hDoris_HOST -PDoris_PORT -ujack --enable-cleartext-plugin -p
 ```
+
+按提示输入 LDAP 密码 `abcdef`。
 
 **场景三：仅 Doris 中存在账户**
 
@@ -284,8 +391,10 @@ mysql -hDoris_HOST -PDoris_PORT -ujack -p abcdef
 LDAP 中不存在该用户，回退到 Doris 本地认证，使用 Doris 密码登录成功：
 
 ```sql
-mysql -hDoris_HOST -PDoris_PORT -ujack -p 123456
+mysql -hDoris_HOST -PDoris_PORT -ujack -p
 ```
+
+按提示输入 Doris 密码 `123456`。
 
 ## 组授权
 
@@ -442,7 +551,7 @@ JAVA_OPTS_FOR_JDK_17 = "-Djavax.net.ssl.trustStore=/path/to/your/cacerts -Djavax
 
 | 配置项 | 说明 | 默认值 |
 | --- | --- | --- |
-| `ldap_user_cache_timeout_s` | LDAP 用户信息的缓存时间（秒） | 43200（12 小时） |
+| `ldap_user_cache_timeout_s` | LDAP 用户信息的缓存时间（秒） | 300（5 分钟） |
 
 在以下场景中，可能需要手动刷新缓存以使变更立即生效：
 
